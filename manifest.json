@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Chrome Apple Emoji",
+  "version": "1.0.0",
+  "description": "Render Apple-style emoji in Chrome/Edge on Windows. Perfect for GDI/MacType users.",
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["content.js"],
+    "run_at": "document_end",
+    "all_frames": true
+  }],
+  "web_accessible_resources": [{
+    "resources": ["png/*.png"],
+    "matches": ["<all_urls>"]
+  }]
+}

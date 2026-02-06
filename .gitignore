@@ -1,0 +1,14 @@
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup
+*.bak
+*.backup
+
+# Old directory (remove after migration)
+emoji映射/
