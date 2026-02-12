@@ -4,6 +4,22 @@
     const EXTENSION_BASE_URL = chrome.runtime.getURL('png/');
     const BATCH_DELAY = 16;
 
+    // Track initialized shadow roots to avoid duplicate injection
+    const processedShadowRoots = new WeakSet();
+
+    const EMOJI_CSS = `
+        img.emoji {
+            height: 1.15em !important;
+            width: 1.15em !important;
+            vertical-align: -0.22em !important;
+            margin: 0 0.05em !important;
+            display: inline-block !important;
+            image-rendering: auto !important;
+            transform: translateZ(0);
+            contain: layout paint style;
+        }
+    `;
+
     // =========================================================
     // TreeWalker Traversal (Browser-native API, faster than recursion)
     // =========================================================
@@ -30,6 +46,66 @@
         }
 
         nodesToReplace.forEach(callback);
+
+        // Penetrate into Shadow DOM subtrees
+        discoverShadowRoots(rootNode, callback);
+    }
+
+    // =========================================================
+    // Shadow DOM Penetration
+    // =========================================================
+    function discoverShadowRoots(rootNode, callback) {
+        if (rootNode.shadowRoot) {
+            initShadowRoot(rootNode.shadowRoot);
+            efficientWalk(rootNode.shadowRoot, callback);
+        }
+        const elWalker = document.createTreeWalker(
+            rootNode,
+            NodeFilter.SHOW_ELEMENT,
+            null,
+            false
+        );
+        let el;
+        while (el = elWalker.nextNode()) {
+            if (el.shadowRoot) {
+                initShadowRoot(el.shadowRoot);
+                efficientWalk(el.shadowRoot, callback);
+            }
+        }
+    }
+
+    function initShadowRoot(shadowRoot) {
+        if (processedShadowRoots.has(shadowRoot)) return;
+        processedShadowRoots.add(shadowRoot);
+
+        // Inject emoji styles (external CSS can't pierce shadow boundary)
+        const s = document.createElement('style');
+        s.textContent = EMOJI_CSS;
+        shadowRoot.appendChild(s);
+
+        // Observe mutations within this shadow root
+        const so = new MutationObserver((mutations) => {
+            mutations.forEach(mutation => {
+                if (mutation.type === 'childList') {
+                    for (let i = 0; i < mutation.addedNodes.length; i++) {
+                        const node = mutation.addedNodes[i];
+                        if (node.nodeType === 1) {
+                            scheduleScan(node);
+                        } else if (node.nodeType === 3) {
+                            scheduleScan(node.parentNode || shadowRoot);
+                        }
+                    }
+                } else if (mutation.type === 'characterData') {
+                    scheduleScan(mutation.target.parentNode || shadowRoot);
+                }
+            });
+        });
+
+        so.observe(shadowRoot, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
     }
 
     // =========================================================
@@ -162,7 +238,7 @@
         batchTimeout = setTimeout(() => {
             requestAnimationFrame(() => {
                 pendingNodes.forEach(root => {
-                    if (!document.contains(root)) return;
+                    if (!root.isConnected) return;
                     efficientWalk(root, processTextNode);
                 });
                 pendingNodes.clear();
@@ -175,18 +251,7 @@
     // CSS (GPU-accelerated rendering)
     // =========================================================
     const style = document.createElement('style');
-    style.textContent = `
-        img.emoji {
-            height: 1.15em !important;
-            width: 1.15em !important;
-            vertical-align: -0.22em !important;
-            margin: 0 0.05em !important;
-            display: inline-block !important;
-            image-rendering: auto !important;
-            transform: translateZ(0);
-            contain: layout paint style;
-        }
-    `;
+    style.textContent = EMOJI_CSS;
     document.head.appendChild(style);
 
     // =========================================================
