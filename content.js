@@ -20,6 +20,30 @@
         }
     `;
 
+    // Valid single-BMP emoji codepoints that have actual PNG files (153 entries)
+    const VALID_BMP_EMOJI = new Set([
+        '2194', '2195', '2196', '2197', '2198', '2199', '21a9', '21aa',
+        '231a', '231b', '2328', '23cf', '23e9', '23ea', '23eb', '23ec',
+        '23ed', '23ee', '23ef', '23f0', '23f1', '23f2', '23f3', '23f8',
+        '23f9', '23fa', '2600', '2601', '2602', '2603', '2604', '260e',
+        '2611', '2614', '2615', '2618', '261d', '2620', '2622', '2623',
+        '2626', '262a', '262e', '262f', '2638', '2639', '263a', '2640',
+        '2642', '2648', '2649', '264a', '264b', '264c', '264d', '264e',
+        '264f', '2650', '2651', '2652', '2653', '265f', '2660', '2663',
+        '2665', '2666', '2668', '267b', '267e', '267f', '2692', '2693',
+        '2694', '2695', '2696', '2697', '2699', '269b', '269c', '26a0',
+        '26a1', '26a7', '26aa', '26ab', '26b0', '26b1', '26bd', '26be',
+        '26c4', '26c5', '26c8', '26ce', '26cf', '26d1', '26d3', '26d4',
+        '26e9', '26ea', '26f0', '26f1', '26f2', '26f3', '26f4', '26f5',
+        '26f7', '26f8', '26f9', '26fa', '26fd', '2702', '2705', '2708',
+        '2709', '270a', '270b', '270c', '270d', '270f', '2712', '2714',
+        '2716', '271d', '2721', '2728', '2733', '2734', '2744', '2747',
+        '274c', '274e', '2753', '2754', '2755', '2757', '2763', '2764',
+        '2795', '2796', '2797', '27a1', '27b0', '27bf', '2934', '2935',
+        '2b05', '2b06', '2b07', '2b1b', '2b1c', '2b50', '2b55',
+        '3297', '3299'
+    ]);
+
     // =========================================================
     // TreeWalker Traversal (Browser-native API, faster than recursion)
     // =========================================================
@@ -118,18 +142,17 @@
         const firstCodeDec = parseInt(parts[0], 16);
 
         if (parts[0] === '1f48b' && parts.length > 1) return true;
-        if (firstCodeDec >= 0x3000 && firstCodeDec <= 0x30FF) return true;
         if (firstCodeDec >= 0x1D400 && firstCodeDec <= 0x1D7FF) return true;
         if (firstCodeDec >= 0x10000 && firstCodeDec < 0x1F000) return true;
         if (firstCodeDec >= 0x20000) return true;
         if (firstCodeDec >= 0xE000 && firstCodeDec <= 0xF8FF) return true;
 
-        const bmpBlacklist = new Set([
-            0x2312, 0x2661, 0x266a, 0x266c, 0x2729, 0x275a, 0x21bb,
-            0x21e3, 0x271a, 0x2b52, 0x2727, 0x2606, 0x2745, 0x2741,
-            0x273d, 0x2726, 0x2304, 0x219f
-        ]);
-        return bmpBlacklist.has(firstCodeDec);
+        // Whitelist: only replace single BMP codepoints that have actual PNG files
+        if (parts.length === 1 && firstCodeDec < 0x10000) {
+            return !VALID_BMP_EMOJI.has(parts[0]);
+        }
+
+        return false;
     }
 
     const needFe0fList = new Set([
@@ -211,6 +234,22 @@
             img.alt = matchText;
             img.src = `${EXTENSION_BASE_URL}${convertToLocalFilename(iconCode)}`;
             img.loading = "eager";
+
+            // Inline error handler ensures fallback works inside Shadow DOM
+            img.onerror = function () {
+                if (!this.dataset.retried) {
+                    this.dataset.retried = 'true';
+                    if (this.src.includes('fe0f')) {
+                        this.src = this.src.replace(/_?fe0f/g, '');
+                    } else {
+                        this.src = this.src.replace('.png', '_fe0f.png');
+                    }
+                } else {
+                    const t = document.createTextNode(this.alt);
+                    t._emojiReplaced = true;
+                    if (this.parentNode) this.parentNode.replaceChild(t, this);
+                }
+            };
             fragment.appendChild(img);
 
             lastIdx = regexCache.lastIndex;
@@ -285,26 +324,6 @@
         subtree: true,
         characterData: true
     });
-
-    // Graceful degradation: fallback to text if image fails
-    window.addEventListener('error', (e) => {
-        if (e.target.tagName === 'IMG' && e.target.classList.contains('emoji')) {
-            const img = e.target;
-            if (!img.dataset.retried) {
-                img.dataset.retried = "true";
-                if (img.src.includes('fe0f')) {
-                    img.src = img.src.replace(/_?fe0f/g, '');
-                } else {
-                    img.src = img.src.replace('.png', '_fe0f.png');
-                }
-            } else {
-                const text = document.createTextNode(img.alt);
-                text._emojiReplaced = true;
-                img.parentNode.replaceChild(text, img);
-            }
-            e.preventDefault();
-        }
-    }, true);
 
     console.log("Apple Emoji loaded");
 
