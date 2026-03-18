@@ -6,15 +6,18 @@
 
     // Track initialized shadow roots to avoid duplicate injection
     const processedShadowRoots = new WeakSet();
+    const deferredNodes = new Set();
 
     const EMOJI_CSS = `
-        img.emoji {
+        img.emoji[data-apple-emoji="1"] {
             height: 1.15em !important;
             width: 1.15em !important;
             vertical-align: -0.22em !important;
             margin: 0 0.05em !important;
             display: inline-block !important;
             image-rendering: auto !important;
+            pointer-events: none !important;
+            -webkit-user-drag: none !important;
             transform: translateZ(0);
             contain: layout paint style;
         }
@@ -121,6 +124,8 @@
                     }
                 } else if (mutation.type === 'characterData') {
                     scheduleScan(mutation.target.parentNode || shadowRoot);
+                } else if (mutation.type === 'attributes') {
+                    repairEmojiImage(mutation.target);
                 }
             });
         });
@@ -128,7 +133,9 @@
         so.observe(shadowRoot, {
             childList: true,
             subtree: true,
-            characterData: true
+            characterData: true,
+            attributes: true,
+            attributeFilter: ['src']
         });
     }
 
@@ -167,6 +174,97 @@
         baseCode = baseCode.replace(/_?fe0f/g, '');
         if (needFe0fList.has(baseCode)) return `emoji_u${baseCode}_fe0f.png`;
         return `emoji_u${baseCode}.png`;
+    }
+
+    function getEmojiSrcCandidates(iconCode) {
+        const primaryFilename = convertToLocalFilename(iconCode);
+        const fallbackFilename = primaryFilename.includes('_fe0f.png')
+            ? primaryFilename.replace(/_?fe0f\.png$/, '.png')
+            : primaryFilename.replace('.png', '_fe0f.png');
+
+        return [...new Set([
+            `${EXTENSION_BASE_URL}${primaryFilename}`,
+            `${EXTENSION_BASE_URL}${fallbackFilename}`
+        ])];
+    }
+
+    function bindEmojiErrorHandler(img) {
+        const iconCode = img.dataset.emojiCode || (img.alt ? toCodePoint(img.alt) : '');
+        if (!iconCode) return;
+
+        const candidates = getEmojiSrcCandidates(iconCode);
+        img.dataset.emojiCode = iconCode;
+
+        img.onerror = function () {
+            const nextIndex = Number.parseInt(this.dataset.emojiSrcIndex || '0', 10) + 1;
+            if (nextIndex < candidates.length) {
+                this.dataset.emojiSrcIndex = String(nextIndex);
+                this.src = candidates[nextIndex];
+                return;
+            }
+
+            const t = document.createTextNode(this.alt || '');
+            t._emojiReplaced = true;
+            if (this.parentNode) this.parentNode.replaceChild(t, this);
+        };
+    }
+
+    function configureEmojiImage(img, emojiText, iconCode) {
+        img.className = 'emoji';
+        img.draggable = false;
+        img.alt = emojiText;
+        img.loading = 'eager';
+        img.dataset.appleEmoji = '1';
+        img.dataset.emojiCode = iconCode;
+        img.dataset.emojiSrcIndex = '0';
+        bindEmojiErrorHandler(img);
+
+        const [primarySrc] = getEmojiSrcCandidates(iconCode);
+        if (img.src !== primarySrc) {
+            img.src = primarySrc;
+        }
+    }
+
+    function repairEmojiImage(img) {
+        if (!(img instanceof HTMLImageElement)) return;
+
+        const rawSrc = img.getAttribute('src') || '';
+        const currentSrc = img.src || rawSrc;
+        const isManagedEmoji = img.dataset.appleEmoji === '1' ||
+            rawSrc.startsWith(EXTENSION_BASE_URL) ||
+            currentSrc.startsWith(EXTENSION_BASE_URL);
+
+        if (!isManagedEmoji) return;
+
+        const iconCode = img.dataset.emojiCode || (img.alt ? toCodePoint(img.alt) : '');
+        if (!iconCode) return;
+
+        const candidates = getEmojiSrcCandidates(iconCode);
+        const existingIndex = candidates.indexOf(currentSrc);
+
+        img.draggable = false;
+        img.loading = 'eager';
+        img.dataset.appleEmoji = '1';
+        img.dataset.emojiCode = iconCode;
+        img.dataset.emojiSrcIndex = existingIndex >= 0 ? String(existingIndex) : '0';
+        bindEmojiErrorHandler(img);
+
+        if (existingIndex === -1) {
+            img.src = candidates[0];
+        }
+    }
+
+    function repairEmojiImages(rootNode) {
+        if (!rootNode) return;
+
+        if (rootNode.nodeType === Node.ELEMENT_NODE &&
+            rootNode.matches('img.emoji')) {
+            repairEmojiImage(rootNode);
+        }
+
+        if (typeof rootNode.querySelectorAll !== 'function') return;
+
+        rootNode.querySelectorAll('img.emoji').forEach(repairEmojiImage);
     }
 
     // =========================================================
@@ -210,57 +308,45 @@
     // =========================================================
     function processTextNode(node) {
         if (node._emojiReplaced) return;
+        regexCache.lastIndex = 0;
         if (!regexCache.test(node.data)) return;
 
         regexCache.lastIndex = 0;
 
+        const parentNode = node.parentNode;
+        if (!parentNode) return;
+
         const fragment = document.createDocumentFragment();
         let lastIdx = 0;
         let match;
+        let hasReplacement = false;
 
         while ((match = regexCache.exec(node.data)) !== null) {
             const matchText = match[0];
             const iconCode = toCodePoint(matchText);
 
             if (shouldIgnore(iconCode, matchText)) continue;
+            hasReplacement = true;
 
             if (match.index > lastIdx) {
                 fragment.appendChild(document.createTextNode(node.data.slice(lastIdx, match.index)));
             }
 
             const img = document.createElement('img');
-            img.className = 'emoji';
-            img.draggable = false;
-            img.alt = matchText;
-            img.src = `${EXTENSION_BASE_URL}${convertToLocalFilename(iconCode)}`;
-            img.loading = "eager";
-
-            // Inline error handler ensures fallback works inside Shadow DOM
-            img.onerror = function () {
-                if (!this.dataset.retried) {
-                    this.dataset.retried = 'true';
-                    if (this.src.includes('fe0f')) {
-                        this.src = this.src.replace(/_?fe0f/g, '');
-                    } else {
-                        this.src = this.src.replace('.png', '_fe0f.png');
-                    }
-                } else {
-                    const t = document.createTextNode(this.alt);
-                    t._emojiReplaced = true;
-                    if (this.parentNode) this.parentNode.replaceChild(t, this);
-                }
-            };
+            configureEmojiImage(img, matchText, iconCode);
             fragment.appendChild(img);
 
             lastIdx = regexCache.lastIndex;
         }
+
+        if (!hasReplacement) return;
 
         if (lastIdx < node.data.length) {
             fragment.appendChild(document.createTextNode(node.data.slice(lastIdx)));
         }
 
         if (fragment.childNodes.length > 0) {
-            node.parentNode.replaceChild(fragment, node);
+            parentNode.replaceChild(fragment, node);
         }
     }
 
@@ -270,7 +356,49 @@
     let batchTimeout = null;
     let pendingNodes = new Set();
 
+    function hasExpandedSelection() {
+        const selection = document.getSelection();
+        return Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed);
+    }
+
+    function selectionIntersectsNode(node) {
+        if (!node || !node.isConnected || !hasExpandedSelection()) return false;
+
+        const selection = document.getSelection();
+        if (!selection) return false;
+
+        for (let i = 0; i < selection.rangeCount; i++) {
+            const range = selection.getRangeAt(i);
+            try {
+                if (range.intersectsNode(node)) return true;
+            } catch (_) {
+                // Some node types are not supported by intersectsNode.
+            }
+
+            const commonAncestor = range.commonAncestorContainer;
+            if (commonAncestor === node) return true;
+            if (commonAncestor.nodeType === Node.ELEMENT_NODE && commonAncestor.contains(node)) return true;
+            if (node.nodeType === Node.ELEMENT_NODE && node.contains(commonAncestor)) return true;
+        }
+
+        return false;
+    }
+
+    function flushDeferredNodes() {
+        if (hasExpandedSelection() || deferredNodes.size === 0) return;
+
+        const queuedNodes = Array.from(deferredNodes);
+        deferredNodes.clear();
+        queuedNodes.forEach(scheduleScan);
+    }
+
     function scheduleScan(root) {
+        if (!root) return;
+        if (selectionIntersectsNode(root)) {
+            deferredNodes.add(root);
+            return;
+        }
+
         pendingNodes.add(root);
         if (batchTimeout) return;
 
@@ -278,6 +406,11 @@
             requestAnimationFrame(() => {
                 pendingNodes.forEach(root => {
                     if (!root.isConnected) return;
+                    if (selectionIntersectsNode(root)) {
+                        deferredNodes.add(root);
+                        return;
+                    }
+                    repairEmojiImages(root);
                     efficientWalk(root, processTextNode);
                 });
                 pendingNodes.clear();
@@ -291,7 +424,7 @@
     // =========================================================
     const style = document.createElement('style');
     style.textContent = EMOJI_CSS;
-    document.head.appendChild(style);
+    (document.head || document.documentElement).appendChild(style);
 
     // =========================================================
     // Init & MutationObserver
@@ -301,6 +434,8 @@
     } else {
         window.addEventListener('DOMContentLoaded', () => scheduleScan(document.body));
     }
+
+    document.addEventListener('selectionchange', flushDeferredNodes, true);
 
     const observer = new MutationObserver((mutations) => {
         mutations.forEach(mutation => {
@@ -315,6 +450,8 @@
                 }
             } else if (mutation.type === 'characterData') {
                 scheduleScan(mutation.target.parentNode || document.body);
+            } else if (mutation.type === 'attributes') {
+                repairEmojiImage(mutation.target);
             }
         });
     });
@@ -322,7 +459,9 @@
     observer.observe(document.body || document.documentElement, {
         childList: true,
         subtree: true,
-        characterData: true
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['src']
     });
 
     console.log("Apple Emoji loaded");
